@@ -1190,6 +1190,8 @@ struct SearchView: View {
     @State private var showRaw = false
     @State private var showNostrDetail = false
     @State private var copiedKey: String?
+    @State private var searchTask: Task<Void, Never>?
+    @State private var activeSearchHandle: String?
 
     var body: some View {
         Group {
@@ -1239,6 +1241,9 @@ struct SearchView: View {
                 performSearch()
             }
         }
+        .onDisappear {
+            searchTask?.cancel()
+        }
     }
 
     // MARK: - Search Header
@@ -1246,11 +1251,7 @@ struct SearchView: View {
     private var searchHeader: some View {
         HStack(spacing: 10) {
             Button(action: {
-                zone = nil
-                records = []
-                fallbackRecords = []
-                nostrMessages = []
-                errorMessage = nil
+                resetSearchResults()
                 onBack()
             }) {
                 Image(systemName: "chevron.left")
@@ -1278,11 +1279,7 @@ struct SearchView: View {
                 if !query.isEmpty {
                     Button {
                         query = ""
-                        zone = nil
-                        records = []
-                        fallbackRecords = []
-                        nostrMessages = []
-                        errorMessage = nil
+                        resetSearchResults()
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 10))
@@ -1334,8 +1331,47 @@ struct SearchView: View {
         return (nil, [])
     }
 
+    private func normalizeHandle(_ handle: String) -> String {
+        handle.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func isActiveSearch(_ handle: String) -> Bool {
+        !Task.isCancelled && activeSearchHandle == normalizeHandle(handle)
+    }
+
+    private func resetSearchResults() {
+        searchTask?.cancel()
+        searchTask = nil
+        activeSearchHandle = nil
+        zone = nil
+        records = []
+        fallbackRecords = []
+        nostrMessages = []
+        errorMessage = nil
+        isLoading = false
+        isSearchingNostr = false
+        showNostrDetail = false
+    }
+
     private func performSearch() {
         guard let veritas, !query.isEmpty else { return }
+
+        // If pasted text, extract the handle from it; otherwise use query directly
+        let handle: String
+        let originalText = query
+        if isPastedEntry {
+            guard let extracted = extractHandle(from: query) else {
+                resetSearchResults()
+                errorMessage = "No handle found in text"
+                return
+            }
+            handle = extracted
+        } else {
+            handle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        searchTask?.cancel()
+        activeSearchHandle = normalizeHandle(handle)
         isLoading = true
         errorMessage = nil
         zone = nil
@@ -1343,29 +1379,24 @@ struct SearchView: View {
         fallbackRecords = []
         nostrMessages = []
         isSearchingNostr = false
+        showNostrDetail = false
 
-        // If pasted text, extract the handle from it; otherwise use query directly
-        let handle: String
-        let originalText = query
-        if isPastedEntry {
-            guard let extracted = extractHandle(from: query) else {
-                errorMessage = "No handle found in text"
-                isLoading = false
-                return
-            }
-            handle = extracted
-        } else {
-            handle = query
-        }
-
-        Task {
+        searchTask = Task { @MainActor in
             do {
-                // Step 1: Resolve the handle (fast)
                 guard let resolved = try await veritas.resolve(handle: handle) else {
+                    guard isActiveSearch(handle) else { return }
                     errorMessage = "Name not found"
                     isLoading = false
                     return
                 }
+                guard isActiveSearch(handle) else { return }
+                guard normalizeHandle(resolved.handle) == normalizeHandle(handle) else {
+                    // Don't attach another handle's zone/records to this query.
+                    errorMessage = "Name not found"
+                    isLoading = false
+                    return
+                }
+
                 zone = resolved
                 let data = resolved.records.isEmpty ? resolved.fallbackRecords : resolved.records
                 let parsedRecords = parseRecords(data)
@@ -1374,41 +1405,40 @@ struct SearchView: View {
 
                 if let numId = resolved.numId, !numId.isEmpty,
                    let fb = try? await veritas.getFallback(subject: numId) {
+                    guard isActiveSearch(handle) else { return }
                     fallbackRecords = parseRecords(Data(base64Encoded: fb.data))
                 }
 
-                // Step 2: If pasted entry, extract npub + relays and search for nostr messages
                 if isPastedEntry {
                     let nostrInfo = extractNostrInfo(from: parsedRecords)
-
                     if let npub = nostrInfo.npub {
                         let searchText = stripHandle(from: originalText, handle: handle)
                         isSearchingNostr = true
-                        Task {
-                            do {
-                                let messages = try await veritas.findNostr(
-                                    npub: npub,
-                                    relays: nostrInfo.relays,
-                                    text: searchText.isEmpty ? nil : searchText
-                                )
-                                print("[Veritas] findNostr returned \(messages.count) messages for npub=\(npub)")
-                                if !messages.isEmpty {
-                                    withAnimation(.spring(duration: 0.5)) {
-                                        nostrMessages = messages
-                                        showNostrDetail = true
-                                        viewModel.showNostrGlow = true
-                                    }
-                                }
-                            } catch {
-                                print("[Veritas] findNostr failed: \(error)")
+                        let messages = try await veritas.findNostr(
+                            npub: npub,
+                            relays: nostrInfo.relays,
+                            text: searchText.isEmpty ? nil : searchText
+                        )
+                        guard isActiveSearch(handle) else { return }
+                        isSearchingNostr = false
+                        print("[Veritas] findNostr returned \(messages.count) messages for npub=\(npub)")
+                        if !messages.isEmpty {
+                            withAnimation(.spring(duration: 0.5)) {
+                                nostrMessages = messages
+                                showNostrDetail = true
+                                viewModel.showNostrGlow = true
                             }
-                            isSearchingNostr = false
                         }
+                        isSearchingNostr = false
                     }
                 }
+            } catch is CancellationError {
+                return
             } catch {
+                guard isActiveSearch(handle) else { return }
                 errorMessage = error.localizedDescription
                 isLoading = false
+                isSearchingNostr = false
             }
         }
     }
@@ -1437,21 +1467,12 @@ struct SearchView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                // Records (no heading)
-                if !records.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(displayRecords.enumerated()), id: \.offset) { _, record in
-                            recordRow(record)
-                        }
-                    }
+                if !displayRecords.isEmpty {
+                    recordsSection(title: "cert-relay", records: displayRecords)
                 }
 
                 if !displayFallbackRecords.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(displayFallbackRecords.enumerated()), id: \.offset) { _, record in
-                            recordRow(record)
-                        }
-                    }
+                    recordsSection(title: "on-chain", records: displayFallbackRecords)
                 }
 
                 // More (raw data + export cert)
@@ -1498,6 +1519,19 @@ struct SearchView: View {
             switch record {
             case .txt, .addr, .blob: return true
             case .seq, .sig, .malformed, .unknown: return false
+            }
+        }
+    }
+
+    private func recordsSection(title: String, records: [ParsedRecord]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.25))
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(records.enumerated()), id: \.offset) { _, record in
+                    recordRow(record)
+                }
             }
         }
     }

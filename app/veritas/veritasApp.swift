@@ -184,8 +184,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !screen.frame.intersects(frame) { return true }
 
         if #available(macOS 12.0, *) {
-            let left = screen.auxiliaryTopLeftArea
-            let right = screen.auxiliaryTopRightArea
+            let left = screen.auxiliaryTopLeftArea ?? .zero
+            let right = screen.auxiliaryTopRightArea ?? .zero
             if left.width > 0 || right.width > 0 {
                 let mid = CGPoint(x: frame.midX, y: frame.midY)
                 if !left.contains(mid) && !right.contains(mid) {
