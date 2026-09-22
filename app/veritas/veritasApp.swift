@@ -54,7 +54,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover = NSPopover()
         popover.contentSize = NSSize(width: 400, height: 570)
-        popover.behavior = .semitransient
+        popover.behavior = .transient
         popover.animates = true
         contentController = NSHostingController(
             rootView: PopoverContentView(viewModel: viewModel)
@@ -117,6 +117,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
             return
         }
+        if isFallbackWindowVisible {
+            fallbackWindow?.orderOut(nil)
+            return
+        }
         presentLaunchUI()
     }
 
@@ -142,7 +146,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !popover.isShown {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
-        styleChrome(popover.contentViewController?.view.window)
+        if let window = popover.contentViewController?.view.window {
+            window.isOpaque = false
+            window.backgroundColor = .clear
+        }
     }
 
     private func showFallbackWindow() {
@@ -151,25 +158,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if fallbackWindow == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 400, height: 570),
-                styleMask: [.titled, .closable, .fullSizeContentView],
+                styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered,
                 defer: false
             )
             window.title = "Veritas"
             window.isReleasedWhenClosed = false
-            window.titlebarAppearsTransparent = true
-            window.isMovableByWindowBackground = true
+            window.center()
             fallbackWindow = window
         }
         fallbackWindow?.contentViewController = contentController
-        styleChrome(fallbackWindow)
-        fallbackWindow?.center()
         fallbackWindow?.makeKeyAndOrderFront(nil)
     }
 
-    private func styleChrome(_ window: NSWindow?) {
-        window?.isOpaque = false
-        window?.backgroundColor = .clear
+    private var isFallbackWindowVisible: Bool {
+        fallbackWindow?.isVisible ?? false
     }
 
     /// True when the extra is hidden, clipped, or sitting under the camera notch.
