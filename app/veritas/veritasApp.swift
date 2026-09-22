@@ -23,11 +23,17 @@ struct veritasApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
+    private var fallbackWindow: NSWindow?
+    private var contentController: NSHostingController<PopoverContentView>!
     private var veritas: Veritas!
     let viewModel = VeritasViewModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.autosaveName = "VeritasStatusItem"
+        statusItem.behavior = .removalAllowed
 
         if let button = statusItem.button {
             button.image = NSImage(named: "MenuBarIcon")
@@ -48,11 +54,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover = NSPopover()
         popover.contentSize = NSSize(width: 400, height: 570)
-        popover.behavior = .transient
+        popover.behavior = .semitransient
         popover.animates = true
-        popover.contentViewController = NSHostingController(
+        contentController = NSHostingController(
             rootView: PopoverContentView(viewModel: viewModel)
         )
+        popover.contentViewController = contentController
 
         // Listen for share extension notifications
         DistributedNotificationCenter.default().addObserver(
@@ -61,6 +68,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSNotification.Name("com.lcfx.veritas.shareQuery"),
             object: nil
         )
+
+        NSApp.activate(ignoringOtherApps: true)
+        // Status item layout (including notch clipping) is not ready until the next run loop.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.presentLaunchUI()
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        presentLaunchUI()
+        return true
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 
     // MARK: - Share Extension Handling
@@ -86,34 +108,93 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleIncomingQuery(_ query: String) {
-        // Show the popover
-        if let button = statusItem.button, !popover.isShown {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-
-            if let popoverWindow = popover.contentViewController?.view.window {
-                popoverWindow.isOpaque = false
-                popoverWindow.backgroundColor = .clear
-            }
-        }
-
-        // Navigate to search
+        presentLaunchUI()
         viewModel.pendingShareQuery = query
     }
 
     @objc private func togglePopover() {
-        guard let button = statusItem.button else { return }
-
         if popover.isShown {
             popover.performClose(nil)
-        } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            return
+        }
+        presentLaunchUI()
+    }
 
-            // Style the popover window for glass effect
-            if let popoverWindow = popover.contentViewController?.view.window {
-                popoverWindow.isOpaque = false
-                popoverWindow.backgroundColor = .clear
+    /// Show UI on launch, Dock click, and when the status item is unusable.
+    private func presentLaunchUI() {
+        NSApp.activate(ignoringOtherApps: true)
+        if isStatusItemObscured {
+            popover.performClose(nil)
+            showFallbackWindow()
+        } else {
+            fallbackWindow?.orderOut(nil)
+            showPopover()
+        }
+    }
+
+    private func showPopover() {
+        guard let button = statusItem.button else {
+            showFallbackWindow()
+            return
+        }
+        fallbackWindow?.contentViewController = nil
+        popover.contentViewController = contentController
+        if !popover.isShown {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
+        styleChrome(popover.contentViewController?.view.window)
+    }
+
+    private func showFallbackWindow() {
+        popover.performClose(nil)
+        popover.contentViewController = nil
+        if fallbackWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 400, height: 570),
+                styleMask: [.titled, .closable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Veritas"
+            window.isReleasedWhenClosed = false
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            fallbackWindow = window
+        }
+        fallbackWindow?.contentViewController = contentController
+        styleChrome(fallbackWindow)
+        fallbackWindow?.center()
+        fallbackWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func styleChrome(_ window: NSWindow?) {
+        window?.isOpaque = false
+        window?.backgroundColor = .clear
+    }
+
+    /// True when the extra is hidden, clipped, or sitting under the camera notch.
+    private var isStatusItemObscured: Bool {
+        if !statusItem.isVisible { return true }
+        guard let button = statusItem.button, let window = button.window else { return true }
+
+        let frame = window.frame
+        if frame.width < 8 || frame.height < 8 { return true }
+
+        guard let screen = window.screen ?? NSScreen.main else { return true }
+        if !screen.frame.intersects(frame) { return true }
+
+        if #available(macOS 12.0, *) {
+            let left = screen.auxiliaryTopLeftArea
+            let right = screen.auxiliaryTopRightArea
+            if left.width > 0 || right.width > 0 {
+                let mid = CGPoint(x: frame.midX, y: frame.midY)
+                if !left.contains(mid) && !right.contains(mid) {
+                    return true
+                }
             }
         }
+
+        return false
     }
 }
 
